@@ -1,7 +1,7 @@
 import React from "react";
 import type { Metadata } from "next";
 import { Inter, Space_Grotesk, JetBrains_Mono } from "next/font/google";
-import { HeroUIProvider } from "@heroui/react";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const inter = Inter({
@@ -35,9 +35,9 @@ export default function RootLayout({
       className={`${inter.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`}
     >
       <body className="antialiased min-h-screen bg-background text-text-primary">
-        <HeroUIProvider>
+        <Providers>
           {children}
-        </HeroUIProvider>
+        </Providers>
       </body>
     </html>
   );

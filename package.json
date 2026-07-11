@@ -21,13 +21,14 @@
     "@heroui/react": "^2.6.8"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
     "@tailwindcss/postcss": "^4.0.0-beta.4",
     "@types/node": "^20.17.9",
     "@types/papaparse": "^5.3.15",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
-    "eslint": "^10.7.0",
-    "eslint-config-next": "^16.2.10",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "15.1.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^4.0.0-beta.4",
     "typescript": "^5.7.2"
