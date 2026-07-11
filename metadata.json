@@ -1,0 +1,8 @@
+{
+  "name": "Inset Sheet Validator",
+  "description": "An interactive exhibition campaign and inset sheet CSV validator designed for ParallelDots metadata standards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
