@@ -4,7 +4,7 @@ export type Severity = "ERROR" | "WARNING";
 
 export interface ValidationIssue {
   id: string;
-  row: number;
+  row: number; // 0 = sheet-level issue (not tied to a single row)
   insetId: string;
   severity: Severity;
   rule: string;
@@ -16,30 +16,72 @@ export interface ValidationSummary {
   fileName: string;
   totalRows: number;
   issues: ValidationIssue[];
-  errorCount: number;
-  warningCount: number;
+  errorCount: number; // total ERROR issues (a row may contribute several)
+  warningCount: number; // total WARNING issues
+  errorRows: number; // distinct data rows with at least one ERROR
+  passingRows: number; // totalRows - errorRows (never negative)
+  healthPct: number; // passingRows / totalRows, 0 when there are no rows
 }
+
+// Field aliases matched loosely (case-insensitive, punctuation-insensitive).
+const FIELD_ALIASES = {
+  status: ["status"],
+  cleanedPatch: ["cleaned_patch_count", "cleanedPatchCount", "cleaned_patch", "cpc"],
+  patchCount: ["patch_count", "patchCount", "patch"],
+  groupDelete: ["group_delete_status", "groupDeleteStatus", "group_delete", "gds"],
+  groupName: ["group_name", "groupName", "group"],
+  insetId: ["inset_id", "insetId", "id", "inset", "code"],
+} as const;
+
+const normalizeKey = (k: string) => k.trim().toLowerCase().replace(/[\s_-]/g, "");
+
+// "Others" must appear as a standalone, exactly-cased word: "Others" or
+// "Fruit Juice - Others". "others", "OTHERS", "AnOthers", "Others1" do not count.
+const OTHERS_REGEX = /\bOthers\b/;
+
+const isRowEmpty = (row: Record<string, string>) =>
+  Object.values(row).every((v) => (v ?? "").trim() === "");
 
 export function validateCSV(file: File): Promise<ValidationSummary> {
   return new Promise((resolve, reject) => {
+    // skipEmptyLines is intentionally OFF so that a row's array index maps
+    // directly to its line in the file (header = line 1, data starts at line 2);
+    // blank rows are skipped manually below without shifting reported row numbers.
     Papa.parse(file, {
       header: true,
-      skipEmptyLines: "greedy",
+      skipEmptyLines: false,
       complete: (results) => {
-        const data = results.data as Record<string, string>[];
+        resolve(validateRows(results.data as Record<string, string>[], file.name));
+      },
+      error: (error) => reject(error),
+    });
+  });
+}
+
+// Pure validation over already-parsed rows. `data` must include blank rows
+// (row array index maps to file line: header = line 1, data starts at line 2).
+export function validateRows(data: Record<string, string>[], fileName: string): ValidationSummary {
         const issues: ValidationIssue[] = [];
+        const errorRowSet = new Set<number>();
         let errorCount = 0;
         let warningCount = 0;
+        let totalRows = 0;
+
+        // Sheet-level tracking for the "Others" requirement.
+        let groupNameColumnSeen = false;
+        let foundOthersGroup = false;
 
         data.forEach((row, index) => {
-          const rowIndex = index + 2; // Row index in CSV (1-based + 1 for header)
+          if (isRowEmpty(row)) return;
+          totalRows++;
 
-          // 1. Identify columns with case-insensitive / loose matching
-          const findValue = (keys: string[]): { val: string; key: string } => {
+          const rowIndex = index + 2; // header is line 1
+
+          const findValue = (aliases: readonly string[]): { val: string; key: string } => {
             for (const key of Object.keys(row)) {
-              const normalizedKey = key.trim().toLowerCase().replace(/[\s_-]/g, "");
-              for (const searchKey of keys) {
-                if (normalizedKey === searchKey.toLowerCase().replace(/[\s_-]/g, "")) {
+              const nk = normalizeKey(key);
+              for (const alias of aliases) {
+                if (nk === normalizeKey(alias)) {
                   return { val: (row[key] || "").trim(), key };
                 }
               }
@@ -47,209 +89,202 @@ export function validateCSV(file: File): Promise<ValidationSummary> {
             return { val: "", key: "" };
           };
 
-          // Find specific fields
-          const statusField = findValue(["status"]);
-          const cleanedPatchField = findValue(["cleaned_patch_count", "cleanedPatchCount", "cleaned_patch", "cpc"]);
-          const patchCountField = findValue(["patch_count", "patchCount", "patch"]);
-          const groupDeleteField = findValue(["group_delete_status", "groupDeleteStatus", "group_delete", "gds"]);
-          const groupNameField = findValue(["group_name", "groupName", "group"]);
-          const insetIdField = findValue(["inset_id", "insetId", "id", "inset", "code"]);
+          const statusField = findValue(FIELD_ALIASES.status);
+          const cleanedPatchField = findValue(FIELD_ALIASES.cleanedPatch);
+          const patchCountField = findValue(FIELD_ALIASES.patchCount);
+          const groupDeleteField = findValue(FIELD_ALIASES.groupDelete);
+          const groupNameField = findValue(FIELD_ALIASES.groupName);
+          const insetIdField = findValue(FIELD_ALIASES.insetId);
 
-          // Determine insetId to display, fallback to first column or Row number
+          // Display label for the row, falling back to the first column value.
           let insetId = insetIdField.val;
           if (!insetId) {
             const firstColKey = Object.keys(row)[0];
-            if (firstColKey && row[firstColKey]) {
-              insetId = `${firstColKey}: ${row[firstColKey]}`;
-            } else {
-              insetId = `Row ${rowIndex}`;
-            }
+            insetId = firstColKey && row[firstColKey] ? `${firstColKey}: ${row[firstColKey]}` : `Row ${rowIndex}`;
           }
 
-          // Generate unique issue ID
-          const makeIssueId = (ruleName: string) => `${rowIndex}_${ruleName}`;
-
-          // --- RULE 1: Status Code Check ---
-          // Requirement: must be exactly "1"
-          if (statusField.key) {
-            if (statusField.val !== "1") {
+          const addIssue = (
+            ruleName: string,
+            severity: Severity,
+            value: string,
+            message: string,
+            idSuffix: string
+          ) => {
+            if (severity === "ERROR") {
               errorCount++;
-              issues.push({
-                id: makeIssueId("status"),
-                row: rowIndex,
-                insetId,
-                severity: "ERROR",
-                rule: "Status Code Check",
-                value: statusField.val,
-                message: `Status is "${statusField.val}" but must be exactly "1" to denote active campaign.`,
-              });
+              errorRowSet.add(rowIndex);
+            } else {
+              warningCount++;
             }
-          } else {
-            // Missing status column
-            errorCount++;
             issues.push({
-              id: makeIssueId("status_missing"),
+              id: `${rowIndex}_${idSuffix}`,
               row: rowIndex,
               insetId,
-              severity: "ERROR",
-              rule: "Status Code Check",
-              value: "MISSING",
-              message: "Required 'status' column is missing from the sheet.",
+              severity,
+              rule: ruleName,
+              value,
+              message,
             });
+          };
+
+          // --- RULE 1: Status Code Check — must be exactly "1" ---
+          if (statusField.key) {
+            if (statusField.val !== "1") {
+              addIssue(
+                "Status Code Check",
+                "ERROR",
+                statusField.val,
+                `Status is "${statusField.val}" but must be exactly "1" to denote active campaign.`,
+                "status"
+              );
+            }
+          } else {
+            addIssue("Status Code Check", "ERROR", "MISSING", "Required 'status' column is missing from the sheet.", "status_missing");
           }
 
           // --- RULE 2: Patch Count Consistency ---
-          if (cleanedPatchField.key || patchCountField.key) {
+          if (cleanedPatchField.key && patchCountField.key) {
             const cleanedVal = cleanedPatchField.val;
             const patchVal = patchCountField.val;
             const cleanedNum = Number(cleanedVal);
             const patchNum = Number(patchVal);
-
             const isCleanedValid = cleanedVal !== "" && !isNaN(cleanedNum);
             const isPatchValid = patchVal !== "" && !isNaN(patchNum);
 
             if (!isCleanedValid || !isPatchValid) {
-              errorCount++;
-              issues.push({
-                id: makeIssueId("patch_invalid"),
-                row: rowIndex,
-                insetId,
-                severity: "ERROR",
-                rule: "Patch Count Consistency",
-                value: `cleaned: "${cleanedVal}", total: "${patchVal}"`,
-                message: "Patch counts must be valid numeric values.",
-              });
-            } else {
-              // 1. cleaned_patch_count must not be 0
-              if (cleanedNum === 0) {
-                errorCount++;
-                issues.push({
-                  id: makeIssueId("patch_zero"),
-                  row: rowIndex,
-                  insetId,
-                  severity: "ERROR",
-                  rule: "Patch Count Consistency",
-                  value: String(cleanedNum),
-                  message: "Cleaned patch count cannot be 0.",
-                });
-              }
-              // 2. cleaned_patch_count cannot be greater than patch_count
-              else if (cleanedNum > patchNum) {
-                errorCount++;
-                issues.push({
-                  id: makeIssueId("patch_overflow"),
-                  row: rowIndex,
-                  insetId,
-                  severity: "ERROR",
-                  rule: "Patch Count Consistency",
-                  value: `cleaned: ${cleanedNum}, total: ${patchNum}`,
-                  message: `Cleaned patch count (${cleanedNum}) cannot exceed total patch count (${patchNum}).`,
-                });
-              }
-              // 3. cleaned_patch_count >= 10,000 flags high-volume verification warnings
-              else if (cleanedNum >= 10000) {
-                warningCount++;
-                issues.push({
-                  id: makeIssueId("patch_high"),
-                  row: rowIndex,
-                  insetId,
-                  severity: "WARNING",
-                  rule: "Patch Count Consistency",
-                  value: String(cleanedNum),
-                  message: `High-volume patch count warning: Cleaned patch count is unusually high (${cleanedNum}).`,
-                });
-              }
+              addIssue(
+                "Patch Count Consistency",
+                "ERROR",
+                `cleaned: "${cleanedVal}", total: "${patchVal}"`,
+                "Patch counts must be valid numeric values.",
+                "patch_invalid"
+              );
+            } else if (cleanedNum === 0) {
+              addIssue("Patch Count Consistency", "ERROR", String(cleanedNum), "Cleaned patch count cannot be 0.", "patch_zero");
+            } else if (cleanedNum > patchNum) {
+              addIssue(
+                "Patch Count Consistency",
+                "ERROR",
+                `cleaned: ${cleanedNum}, total: ${patchNum}`,
+                `Cleaned patch count (${cleanedNum}) cannot exceed total patch count (${patchNum}).`,
+                "patch_overflow"
+              );
+            } else if (cleanedNum >= 10000) {
+              addIssue(
+                "Patch Count Consistency",
+                "WARNING",
+                String(cleanedNum),
+                `High-volume patch count warning: Cleaned patch count is unusually high (${cleanedNum}).`,
+                "patch_high"
+              );
             }
           } else {
-            // Missing patch count columns
-            errorCount++;
-            issues.push({
-              id: makeIssueId("patch_missing"),
-              row: rowIndex,
-              insetId,
-              severity: "ERROR",
-              rule: "Patch Count Consistency",
-              value: "MISSING",
-              message: "Required 'cleaned_patch_count' or 'patch_count' columns are missing.",
-            });
+            // At least one of the two required columns is absent.
+            const present = cleanedPatchField.key || patchCountField.key;
+            addIssue(
+              "Patch Count Consistency",
+              "ERROR",
+              "MISSING",
+              present
+                ? "Both 'cleaned_patch_count' and 'patch_count' columns are required; one is missing."
+                : "Required 'cleaned_patch_count' and 'patch_count' columns are missing.",
+              "patch_missing"
+            );
           }
 
-          // --- RULE 3: Exhibition Group Deletion Lock ---
-          // Requirement: must not be equal to "1"
-          if (groupDeleteField.key) {
-            if (groupDeleteField.val === "1") {
-              errorCount++;
-              issues.push({
-                id: makeIssueId("group_delete"),
-                row: rowIndex,
-                insetId,
-                severity: "ERROR",
-                rule: "Exhibition Group Deletion Lock",
-                value: groupDeleteField.val,
-                message: "Exhibition group is locked/queued for deletion (group_delete_status = 1).",
-              });
-            }
+          // --- RULE 3: Exhibition Group Deletion Lock — must not equal "1" ---
+          if (groupDeleteField.key && groupDeleteField.val === "1") {
+            addIssue(
+              "Exhibition Group Deletion Lock",
+              "ERROR",
+              groupDeleteField.val,
+              "Exhibition group is locked/queued for deletion (group_delete_status = 1).",
+              "group_delete"
+            );
           }
 
           // --- RULE 4: Group Name Cleanliness ---
           if (groupNameField.key) {
+            groupNameColumnSeen = true;
             const name = groupNameField.val;
-            
-            // Find all characters that are NOT alphanumeric, space, underscore, or dash
-            const disallowedRegex = /[^a-zA-Z0-9_ -]/g;
-            const matches = name.match(disallowedRegex);
 
-            if (matches) {
-              const uniqueMatches = Array.from(new Set(matches));
-              
-              // Separate into non-ASCII and standard special characters
-              const nonAsciiMatches = uniqueMatches.filter(c => /[^\x00-\x7F]/.test(c));
-              const specialMatches = uniqueMatches.filter(c => /[\x00-\x7F]/.test(c));
-              
-              const displayChar = (c: string) => c === " " ? '"space"' : `"${c}"`;
+            if (!foundOthersGroup && OTHERS_REGEX.test(name)) {
+              foundOthersGroup = true;
+            }
 
-              if (nonAsciiMatches.length > 0) {
-                const charsDisplay = nonAsciiMatches.map(displayChar).join(", ");
-                const charWord = nonAsciiMatches.length > 1 ? "characters" : "character";
-                errorCount++;
-                issues.push({
-                  id: makeIssueId("group_name_unicode"),
-                  row: rowIndex,
-                  insetId,
-                  severity: "ERROR",
-                  rule: "Group Name Cleanliness",
-                  value: name,
-                  message: `Group name contains disallowed non-ASCII ${charWord} or emoji: ${charsDisplay}`,
-                });
-              } else if (specialMatches.length > 0) {
-                const charsDisplay = specialMatches.map(displayChar).join(", ");
-                const charWord = specialMatches.length > 1 ? "characters" : "character";
-                errorCount++;
-                issues.push({
-                  id: makeIssueId("group_name_chars"),
-                  row: rowIndex,
-                  insetId,
-                  severity: "ERROR",
-                  rule: "Group Name Cleanliness",
-                  value: name,
-                  message: `Group name contains the disallowed special ${charWord}: ${charsDisplay}`,
-                });
+            // Match by Unicode code point (the `u` flag keeps emoji/astral
+            // characters intact instead of splitting them into surrogate halves).
+            const disallowed = name.match(/[^a-zA-Z0-9_ -]/gu);
+            if (disallowed) {
+              const unique = Array.from(new Set(disallowed));
+              const nonAscii = unique.filter((c) => /[^\x00-\x7F]/u.test(c));
+              const special = unique.filter((c) => /^[\x00-\x7F]$/.test(c));
+              const displayChar = (c: string) => (c === " " ? '"space"' : `"${c}"`);
+
+              if (nonAscii.length > 0) {
+                const word = nonAscii.length > 1 ? "characters" : "character";
+                addIssue(
+                  "Group Name Cleanliness",
+                  "ERROR",
+                  name,
+                  `Group name contains disallowed non-ASCII ${word} or emoji: ${nonAscii.map(displayChar).join(", ")}`,
+                  "group_name_unicode"
+                );
+              } else if (special.length > 0) {
+                const word = special.length > 1 ? "characters" : "character";
+                addIssue(
+                  "Group Name Cleanliness",
+                  "ERROR",
+                  name,
+                  `Group name contains the disallowed special ${word}: ${special.map(displayChar).join(", ")}`,
+                  "group_name_chars"
+                );
               }
             }
           }
         });
 
-        resolve({
-          fileName: file.name,
-          totalRows: data.length,
+        // --- RULE 5 (sheet-level): Required "Others" Group ---
+        // At least one group_name must contain the exactly-cased word "Others".
+        if (groupNameColumnSeen) {
+          if (!foundOthersGroup) {
+            errorCount++;
+            issues.unshift({
+              id: "sheet_others_missing",
+              row: 0,
+              insetId: "— Sheet-wide —",
+              severity: "ERROR",
+              rule: "Required Others Group",
+              value: "not found",
+              message:
+                'At least one group must contain the word "Others" (exact casing), e.g. "Others" or "Fruit Juice - Others". None was found.',
+            });
+          }
+        } else if (totalRows > 0) {
+          errorCount++;
+          issues.unshift({
+            id: "sheet_others_no_column",
+            row: 0,
+            insetId: "— Sheet-wide —",
+            severity: "ERROR",
+            rule: "Required Others Group",
+            value: "no group_name column",
+            message: 'No \'group_name\' column found, so the required "Others" group cannot be verified.',
+          });
+        }
+
+        const errorRows = errorRowSet.size;
+        const passingRows = Math.max(0, totalRows - errorRows);
+        const healthPct = totalRows === 0 ? 0 : Math.round((passingRows / totalRows) * 100);
+
+        return {
+          fileName,
+          totalRows,
           issues,
           errorCount,
           warningCount,
-        });
-      },
-      error: (error) => {
-        reject(error);
-      },
-    });
-  });
+          errorRows,
+          passingRows,
+          healthPct,
+        };
 }

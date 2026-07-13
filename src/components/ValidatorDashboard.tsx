@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { 
   Upload, AlertCircle, CheckCircle2, X, Download, Trash2,
@@ -67,6 +67,16 @@ const VALIDATION_RULES: RuleDetail[] = [
     logic: '1. Only alphanumeric characters, spaces, dashes "-", and underscores "_" are allowed. All other special characters are disallowed.\n2. No non-ASCII characters (UTF-8 code points above 127).\n3. No emojis, stickers, or high-plane unicode symbols.',
     examplePass: 'group_name: "Exhibition-Hall-A" or "Phaner Pie"',
     exampleFail: 'group_name: "Hall%North" (disallowed chars) or "Main_Hall_🔥" (sticker/emoji)'
+  },
+  {
+    id: 'others',
+    name: 'Required Others Group',
+    field: 'group_name (sheet-wide)',
+    severity: 'ERROR',
+    description: 'Ensures the sheet contains at least one catch-all "Others" group.',
+    logic: 'Across all rows, at least one group_name must contain the exactly-cased word "Others". It may stand alone ("Others") or be appended to a category ("Fruit Juice - Others"). Lowercase "others" or "OTHERS" do not qualify.',
+    examplePass: 'group_name: "Others" or "Fruit Juice - Others" (present in ≥1 row)',
+    exampleFail: 'No row has a group_name containing the word "Others"'
   }
 ];
 
@@ -142,6 +152,16 @@ export default function ValidatorDashboard() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
+  // Close the reference drawer on Escape.
+  useEffect(() => {
+    if (!isDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsDrawerOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isDrawerOpen]);
+
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
     
@@ -160,7 +180,14 @@ export default function ValidatorDashboard() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'text/csv': ['.csv'] },
+    // Windows/Excel often report .csv as vnd.ms-excel or an empty MIME type, so
+    // accept those and plain text too — all keyed to the .csv extension.
+    accept: {
+      'text/csv': ['.csv'],
+      'application/vnd.ms-excel': ['.csv'],
+      'text/plain': ['.csv'],
+      'application/csv': ['.csv'],
+    },
     multiple: false
   });
 
@@ -195,14 +222,16 @@ export default function ValidatorDashboard() {
 
   const totalPages = Math.max(1, Math.ceil(filteredIssues.length / itemsPerPage));
 
-  // Count matches for rules
+  // Count matches per rule layer. "Required Others Group" is matched by 'others'
+  // and must not fall into the name bucket, so name uses 'cleanliness'/'char'.
   const ruleCounts = useMemo(() => {
-    if (!summary) return { status: 0, patch: 0, delete: 0, name: 0 };
+    if (!summary) return { status: 0, patch: 0, delete: 0, name: 0, others: 0 };
     return {
       status: summary.issues.filter(i => i.rule.toLowerCase().includes('status')).length,
       patch: summary.issues.filter(i => i.rule.toLowerCase().includes('patch') || i.rule.toLowerCase().includes('cpc')).length,
       delete: summary.issues.filter(i => i.rule.toLowerCase().includes('delete') || i.rule.toLowerCase().includes('gds')).length,
-      name: summary.issues.filter(i => i.rule.toLowerCase().includes('name') || i.rule.toLowerCase().includes('char') || i.rule.toLowerCase().includes('sticker')).length,
+      name: summary.issues.filter(i => i.rule.toLowerCase().includes('cleanliness') || i.rule.toLowerCase().includes('char')).length,
+      others: summary.issues.filter(i => i.rule.toLowerCase().includes('others')).length,
     };
   }, [summary]);
 
@@ -226,20 +255,42 @@ export default function ValidatorDashboard() {
     setSelectedIds(next);
   };
 
+  // RFC 4180 cell escaping: wrap in quotes and double any embedded quotes when
+  // the value contains a comma, quote or newline. Prevents malformed exports for
+  // values with special characters (which the validator specifically flags).
+  const csvCell = (value: string | number) => {
+    const s = String(value ?? '');
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
   const exportSelected = () => {
     if (!summary) return;
     const selectedIssues = summary.issues.filter(i => selectedIds.has(i.id));
-    const csvContent = [
-        ['Row', 'Inset ID', 'Severity', 'Rule', 'Current Value', 'Message'],
-        ...selectedIssues.map(i => [i.row, i.insetId, i.severity, i.rule, `"${i.value}"`, `"${i.message}"`])
-    ].map(e => e.join(',')).join('\n');
+    if (selectedIssues.length === 0) return;
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const csvContent = [
+      ['Row', 'Inset ID', 'Severity', 'Rule', 'Current Value', 'Message'],
+      ...selectedIssues.map(i => [
+        i.row === 0 ? 'SHEET' : i.row,
+        i.insetId,
+        i.severity,
+        i.rule,
+        i.value,
+        i.message,
+      ]),
+    ].map(row => row.map(csvCell).join(',')).join('\r\n');
+
+    // BOM so Excel opens UTF-8 group names correctly.
+    const blob = new Blob(['﻿' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `validation_report_${summary.fileName}`;
+    const safeName = summary.fileName.replace(/\.csv$/i, '');
+    a.download = `validation_report_${safeName}.csv`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
   };
 
   const activeIssueCount = selectedIds.size;
@@ -355,7 +406,7 @@ export default function ValidatorDashboard() {
                 <div className="p-6 rounded-[32px] border border-border-main bg-surface space-y-5 shadow-sm">
                   <div>
                     <h2 className="text-xs font-black uppercase tracking-widest text-text-secondary">System Integrity Checklist</h2>
-                    <p className="text-xs text-text-primary font-bold mt-1">Our engine checks 4 distinct logic verification layers:</p>
+                    <p className="text-xs text-text-primary font-bold mt-1">Our engine checks 5 distinct logic verification layers:</p>
                   </div>
 
                   <div className="space-y-3">
@@ -476,20 +527,20 @@ export default function ValidatorDashboard() {
                     <div>
                       <p className={cn(
                         "text-3xl font-black tracking-tight",
-                        summary.errorCount === 0 ? "text-success-main" : summary.errorCount < 4 ? "text-warning-main" : "text-error-main"
+                        summary.healthPct >= 100 ? "text-success-main" : summary.healthPct >= 75 ? "text-warning-main" : "text-error-main"
                       )}>
-                        {Math.max(0, Math.round(((summary.totalRows - summary.errorCount) / summary.totalRows) * 100))}%
+                        {summary.healthPct}%
                       </p>
                       <span className="text-[10px] text-text-secondary font-bold">Row Passing Ratio</span>
                     </div>
                     {/* Linear health line */}
                     <div className="w-20 bg-background h-2 rounded-full overflow-hidden border border-border-main">
-                      <div 
+                      <div
                         className={cn(
                           "h-full rounded-full",
-                          summary.errorCount === 0 ? "bg-success-main" : "bg-error-main"
+                          summary.healthPct >= 100 ? "bg-success-main" : "bg-error-main"
                         )}
-                        style={{ width: `${Math.max(0, Math.round(((summary.totalRows - summary.errorCount) / summary.totalRows) * 100))}%` }}
+                        style={{ width: `${summary.healthPct}%` }}
                       />
                     </div>
                   </div>
@@ -527,9 +578,9 @@ export default function ValidatorDashboard() {
                   </div>
                   <div className="mt-4">
                     <p className="text-3xl font-black tracking-tight text-text-primary">
-                      {summary.totalRows - summary.errorCount} <span className="text-sm text-text-secondary font-extrabold">/ {summary.totalRows}</span>
+                      {summary.passingRows} <span className="text-sm text-text-secondary font-extrabold">/ {summary.totalRows}</span>
                     </p>
-                    <span className="text-[10px] text-text-secondary font-bold">Ready for Campaign Ingestion</span>
+                    <span className="text-[10px] text-text-secondary font-bold">Rows Ready for Campaign Ingestion</span>
                   </div>
                 </div>
               </div>
@@ -600,6 +651,19 @@ export default function ValidatorDashboard() {
                   >
                     <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />
                     <span>Name Characters ({ruleCounts.name})</span>
+                  </Button>
+
+                  <Button
+                    size="sm"
+                    onPress={() => {
+                      setSelectedRuleFilter('others');
+                      setCurrentPage(1);
+                    }}
+                    variant={selectedRuleFilter === 'others' ? 'primary' : 'outline'}
+                    className="font-extrabold text-xs rounded-full flex items-center gap-1.5"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    <span>Others Group ({ruleCounts.others})</span>
                   </Button>
                 </div>
               </div>
@@ -696,7 +760,7 @@ export default function ValidatorDashboard() {
                                   className="w-4 h-4 rounded border-zinc-300 bg-surface text-primary focus:ring-0 cursor-pointer"
                                 />
                               </td>
-                              <td className="px-6 py-4 text-xs font-mono font-bold text-zinc-500">#{issue.row}</td>
+                              <td className="px-6 py-4 text-xs font-mono font-bold text-zinc-500">{issue.row === 0 ? 'SHEET' : `#${issue.row}`}</td>
                               <td className="px-6 py-4 text-xs font-black text-text-primary">{issue.insetId}</td>
                               <td className="px-6 py-4">
                                 <span className={cn(
