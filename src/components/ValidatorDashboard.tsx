@@ -74,7 +74,7 @@ const VALIDATION_RULES: RuleDetail[] = [
     field: 'group_name (sheet-wide)',
     severity: 'ERROR',
     description: 'Ensures the sheet contains at least one catch-all "Others" group.',
-    logic: 'Across all rows, at least one group_name must contain the exactly-cased word "Others". It may stand alone ("Others") or be appended to a category ("Fruit Juice - Others"). Lowercase "others" or "OTHERS" do not qualify.',
+    logic: 'Across all rows, at least one group_name must contain the exactly-cased word "Others". It may stand alone ("Others") or be appended to a category ("Fruit Juice - Others"). Lowercase "others" or "OTHERS" do not qualify. When found, the matching rows are highlighted above the report; only the absence is flagged as an error.',
     examplePass: 'group_name: "Others" or "Fruit Juice - Others" (present in ≥1 row)',
     exampleFail: 'No row has a group_name containing the word "Others"'
   }
@@ -667,6 +667,43 @@ export default function ValidatorDashboard() {
                   </Button>
                 </div>
               </div>
+
+              {/* Required "Others" Group — positive result panel (shown only when found).
+                  Kept separate from the issues table so it doesn't read as a problem. */}
+              {summary.othersMatches.length > 0 && (
+                <div className="bg-success-container border border-success-main/20 rounded-[28px] p-5 shadow-sm">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="h-10 w-10 rounded-full bg-success-main/10 text-success-main flex items-center justify-center border border-success-main/20 shrink-0">
+                      <CheckCircle2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-black tracking-tight text-success-main">Required &quot;Others&quot; group found</h3>
+                      <p className="text-[11px] text-text-secondary font-bold mt-0.5">
+                        {summary.othersMatches.length} group{summary.othersMatches.length > 1 ? 's' : ''} matched the &quot;Others&quot; requirement.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2.5">
+                    {summary.othersMatches.map((m) => (
+                      <span
+                        key={m.row}
+                        className="inline-flex items-center gap-2.5 pl-3 pr-2 py-1.5 rounded-full bg-surface border border-success-main/25 shadow-xs"
+                      >
+                        <span className="text-[10px] font-mono font-black text-zinc-500">#{m.row}</span>
+                        <span className="text-xs font-extrabold text-text-primary max-w-[200px] truncate">{m.value}</span>
+                        <span className={cn(
+                          "px-2 py-0.5 text-[9px] font-extrabold rounded-full uppercase tracking-tight border",
+                          m.exact
+                            ? "bg-success-container text-success-main border-success-main/20"
+                            : "bg-primary-container text-on-primary-container border-primary/20"
+                        )}>
+                          {m.exact ? 'Exact' : 'Appended'}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Data Grid Card */}
               <div className="bg-surface border border-border-main rounded-[28px] overflow-hidden shadow-sm">
