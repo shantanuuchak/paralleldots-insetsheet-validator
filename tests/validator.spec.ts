@@ -31,6 +31,9 @@ Water,1,10,20,0,INS002`);
   check("2 rows", s.totalRows === 2);
   check("health 100%", s.healthPct === 100);
   check("passingRows 2", s.passingRows === 2);
+  check("othersMatches has the appended group", s.othersMatches.length === 1 && s.othersMatches[0].value === "Fruit Juice - Others");
+  check("appended match flagged exact=false", s.othersMatches[0].exact === false);
+  check("no Others issue when found", !s.issues.some((i) => i.rule === "Required Others Group"));
 }
 
 console.log("\n[2] Missing Others group -> sheet-level error");
@@ -41,6 +44,20 @@ Water,1,10,20`);
   check("has sheet Others error", s.issues.some((i) => i.row === 0 && i.rule === "Required Others Group"));
   check("errorCount 1", s.errorCount === 1, JSON.stringify(rules(s)));
   check("sheet error doesn't drop passingRows", s.passingRows === 1 && s.errorRows === 0);
+  check("othersMatches empty when not found", s.othersMatches.length === 0);
+}
+
+console.log("\n[2b] Multiple Others groups: all reported, exact vs appended distinguished");
+{
+  const s = run(
+`group_name,status,cleaned_patch_count,patch_count
+Others,1,10,20
+Fruit Juice - Others,1,10,20
+Water,1,10,20`);
+  check("no Others error", !s.issues.some((i) => i.rule === "Required Others Group"));
+  check("2 matches collected", s.othersMatches.length === 2, JSON.stringify(s.othersMatches));
+  check("bare 'Others' at row 2 is exact", s.othersMatches.some((m) => m.row === 2 && m.exact === true));
+  check("'Fruit Juice - Others' at row 3 is appended", s.othersMatches.some((m) => m.row === 3 && m.exact === false));
 }
 
 console.log("\n[3] Case/word-boundary sensitivity of the Others check");

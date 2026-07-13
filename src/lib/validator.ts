@@ -12,6 +12,12 @@ export interface ValidationIssue {
   message: string;
 }
 
+export interface OthersMatch {
+  row: number; // file line where the Others group was found
+  value: string; // the group_name value
+  exact: boolean; // true when the value is exactly "Others", false when appended
+}
+
 export interface ValidationSummary {
   fileName: string;
   totalRows: number;
@@ -21,6 +27,7 @@ export interface ValidationSummary {
   errorRows: number; // distinct data rows with at least one ERROR
   passingRows: number; // totalRows - errorRows (never negative)
   healthPct: number; // passingRows / totalRows, 0 when there are no rows
+  othersMatches: OthersMatch[]; // rows whose group_name contains the word "Others"
 }
 
 // Field aliases matched loosely (case-insensitive, punctuation-insensitive).
@@ -69,7 +76,7 @@ export function validateRows(data: Record<string, string>[], fileName: string): 
 
         // Sheet-level tracking for the "Others" requirement.
         let groupNameColumnSeen = false;
-        let foundOthersGroup = false;
+        const othersMatches: OthersMatch[] = [];
 
         data.forEach((row, index) => {
           if (isRowEmpty(row)) return;
@@ -208,8 +215,11 @@ export function validateRows(data: Record<string, string>[], fileName: string): 
             groupNameColumnSeen = true;
             const name = groupNameField.val;
 
-            if (!foundOthersGroup && OTHERS_REGEX.test(name)) {
-              foundOthersGroup = true;
+            // Record every group whose name contains the word "Others" (bare
+            // "Others" or appended, e.g. "Fruit Juice - Others"). These are shown
+            // as a positive result above the issues table, not as issues.
+            if (OTHERS_REGEX.test(name)) {
+              othersMatches.push({ row: rowIndex, value: name, exact: name === "Others" });
             }
 
             // Match by Unicode code point (the `u` flag keeps emoji/astral
@@ -246,8 +256,10 @@ export function validateRows(data: Record<string, string>[], fileName: string): 
 
         // --- RULE 5 (sheet-level): Required "Others" Group ---
         // At least one group_name must contain the exactly-cased word "Others".
+        // When found, no issue is raised — the matches are surfaced positively via
+        // summary.othersMatches. Only the absence is an error.
         if (groupNameColumnSeen) {
-          if (!foundOthersGroup) {
+          if (othersMatches.length === 0) {
             errorCount++;
             issues.unshift({
               id: "sheet_others_missing",
@@ -286,5 +298,6 @@ export function validateRows(data: Record<string, string>[], fileName: string): 
           errorRows,
           passingRows,
           healthPct,
+          othersMatches,
         };
 }
